@@ -1,14 +1,14 @@
 #![cfg_attr(feature = "no_console", windows_subsystem = "windows")]
 #![allow(unused_labels)]
 
-use std::net::TcpStream;
 use anyhow::Context;
 use serde_json::value::Index;
 use serde_json::Value;
+use std::net::TcpStream;
 use tray_item::{IconSource, TrayItem};
-use tungstenite::{connect, Message, WebSocket};
+use tungstenite::http::Uri;
 use tungstenite::stream::MaybeTlsStream;
-use url::Url;
+use tungstenite::{connect, Message, WebSocket};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -19,9 +19,12 @@ async fn main() -> anyhow::Result<()> {
     tray.add_label("GAT - GlazeWM Alternating Tiler")?;
     tray.add_menu_item("Quit GAT", || std::process::exit(0))?;
 
-    let (mut socket, _) =
-        connect(Url::parse("ws://localhost:6123").context("Failed to parse GWM WS URL")?)
-            .context("Failed to connect to GWM WS")?;
+    let (mut socket, _) = connect(
+        "ws://localhost:6123"
+            .parse::<Uri>()
+            .context("Failed to parse GWM WS URL")?,
+    )
+    .context("Failed to connect to GWM WS")?;
 
     socket
         .send(Message::Text(r#"sub -e focus_changed"#.into()))
@@ -61,15 +64,14 @@ async fn main() -> anyhow::Result<()> {
 }
 
 fn read_as_json(socket: &mut WebSocket<MaybeTlsStream<TcpStream>>) -> Option<Value> {
-    let msg = match socket
-        .read() {
+    let msg = match socket.read() {
         Ok(msg) => msg,
         Err(err) => {
             eprintln!("Error while reading message: {err}");
             return None;
         }
     };
-    
+
     let text = match msg.to_text() {
         Ok(text) => text,
         Err(err) => {
@@ -77,7 +79,7 @@ fn read_as_json(socket: &mut WebSocket<MaybeTlsStream<TcpStream>>) -> Option<Val
             return None;
         }
     };
-    
+
     let json_msg = match text.parse::<Value>() {
         Ok(msg) => msg,
         Err(err) => {
@@ -85,7 +87,7 @@ fn read_as_json(socket: &mut WebSocket<MaybeTlsStream<TcpStream>>) -> Option<Val
             return None;
         }
     };
-    
+
     Some(json_msg)
 }
 
