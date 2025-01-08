@@ -17,7 +17,7 @@ For proper inspiration, look up [jonhoo's OBS-DO project](https://github.com/jon
 ### Okay, so how would I set this up to build from scratch?
 Rust@Nightly-GNU:
 
-```Rust
+```bash
 rustup install nightly-gnu
 rustup default nightly-gnu
 ```

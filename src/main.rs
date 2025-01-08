@@ -1,130 +1,108 @@
 #![cfg_attr(feature = "no_console", windows_subsystem = "windows")]
 #![allow(unused_labels)]
 
+use std::net::TcpStream;
+use anyhow::Context;
+use serde_json::value::Index;
 use serde_json::Value;
-use tray_item::{
-	IconSource,
-	TrayItem,
-};
-use tungstenite::{
-	connect,
-	Message,
-};
+use tray_item::{IconSource, TrayItem};
+use tungstenite::{connect, Message, WebSocket};
+use tungstenite::stream::MaybeTlsStream;
 use url::Url;
 
 #[tokio::main]
-async fn main() -> anyhow::Result<()>
-{
-	let mut tray: TrayItem = TrayItem::new(
-		"GAT - GlazeWM Alternating Tiler",
-		IconSource::Resource("main-icon"),
-	)?;
-	tray.add_label("GAT - GlazeWM Alternating Tiler")?;
-	tray.add_menu_item("Quit GAT", || std::process::exit(0))?;
+async fn main() -> anyhow::Result<()> {
+    let mut tray: TrayItem = TrayItem::new(
+        "GAT - GlazeWM Alternating Tiler",
+        IconSource::Resource("main-icon"),
+    )?;
+    tray.add_label("GAT - GlazeWM Alternating Tiler")?;
+    tray.add_menu_item("Quit GAT", || std::process::exit(0))?;
 
-	let (mut socket, _) = connect(match Url::parse("ws://localhost:6123") {
-		Ok(u) => u,
-		Err(_) => {
-			eprintln!("\nERR: Could not parse registered string to URL, was this mistyped?\n");
-			panic!(
-				"\nMOR: Cannot continue runtime, please double-check your computer configuration!\n"
-			);
-		}
-	})
-	.expect("\nERR: Cant' connect to GWM WS!\n");
+    let (mut socket, _) =
+        connect(Url::parse("ws://localhost:6123").context("Failed to parse GWM WS URL")?)
+            .context("Failed to connect to GWM WS")?;
 
-	'sub_check: loop {
-		if let Err(_) = socket.send(Message::Text("sub -e focus_changed".into())) {
-			if let Err(_) = socket.send(Message::Text("subscribe -e \"focus_changed\"".into())) {
-				if let Err(_) = socket.send(Message::Text("subscribe -e focus_changed".into())) {
-					panic!(
-						"\nMOR: No known method for subscribing to GWM focus_changed event worked, process suicide!\n"
-					);
-				} else {
-					break 'sub_check;
-				}
-			} else {
-				break 'sub_check;
-			}
-		} else {
-			break 'sub_check;
-		}
-	}
+    socket
+        .send(Message::Text(r#"sub -e focus_changed"#.into()))
+        .context("Failed to subscribe to focus_changed event")?;
 
-	'focus_sub: loop {
-		let json_msg: Value = match serde_json::from_str(
-			socket
-				.read()
-				.expect("\nERR: Could not read message!\n")
-				.to_text()
-				.unwrap_or_default(),
-		) {
-			Ok(v) => v,
-			Err(e) => {
-				eprintln!("\nERR: GWM WS MSG could not be parsed to Value! Raw error:\n{e}\n");
-				continue;
-			}
-		};
+    loop {
+        let (x, y) = {
+            let json_msg = match read_as_json(&mut socket) {
+                Some(value) => value,
+                None => continue,
+            };
 
-		let (x, y) = if let Some(x) = json_msg["data"]["focusedContainer"]["width"].as_f64() {
-			if let Some(y) = json_msg["data"]["focusedContainer"]["height"].as_f64() {
-				(x, y)
-			} else {
-				continue;
-			}
-		} else {
-			continue;
-		};
+            let x = json_msg
+                .get_path(["data", "focusedContainer", "width"])
+                .and_then(|v| v.as_f64());
+            let y = json_msg
+                .get_path(["data", "focusedContainer", "height"])
+                .and_then(|v| v.as_f64());
 
-		let tiling_direction: Value = {
-			socket.send(Message::Text("query tiling-direction".into()))?;
-			serde_json::from_str(
-				socket
-					.read()
-					.expect("\nERR: Could not read message!\n")
-					.to_text()
-					.unwrap_or_default(),
-			)?
-		};
+            match (x, y) {
+                (Some(x), Some(y)) => (x, y),
+                _ => continue, // skip messages that don't contain the required data
+            }
+        };
 
-		if x < y {
-			if let Err(_) = socket.send(Message::Text(
-				"command set-tiling-direction vertical".into(),
-			)) {
-				if let Err(_) = socket.send(Message::Text(
-					"command \"tiling direction vertical\"".into(),
-				)) {
-					if tiling_direction["data"]["tilingDirection"] == "\"horizontal\"" {
-						let _ =
-							socket.send(Message::Text("command toggle-tiling-direction".into()));
-					} else {
-						continue;
-					}
-				} else {
-					continue;
-				}
-			} else {
-				continue;
-			}
-		} else if x > y {
-			if let Err(_) = socket.send(Message::Text(
-				"command set-tiling-direction horizontal".into(),
-			)) {
-				if let Err(_) = socket.send(Message::Text(
-					"command \"tiling direction horizontal\"".into(),
-				)) {
-					if tiling_direction == "\"vertical\"" {
-						let _ =
-							socket.send(Message::Text("command toggle-tiling-direction".into()));
-					} else {
-						continue;
-					}
-				} else {
-					continue;
-				}
-			} else {
-				continue;
-			}
-		}
-	}
+        if x < y {
+            let _ = socket.send(Message::Text(
+                "command set-tiling-direction vertical".into(),
+            ));
+        }
+        if x > y {
+            let _ = socket.send(Message::Text(
+                "command set-tiling-direction horizontal".into(),
+            ));
+        }
+    }
+}
+
+fn read_as_json(socket: &mut WebSocket<MaybeTlsStream<TcpStream>>) -> Option<Value> {
+    let msg = match socket
+        .read() {
+        Ok(msg) => msg,
+        Err(err) => {
+            eprintln!("Error while reading message: {err}");
+            return None;
+        }
+    };
+    
+    let text = match msg.to_text() {
+        Ok(text) => text,
+        Err(err) => {
+            eprintln!("Error while converting message to text: {err}");
+            return None;
+        }
+    };
+    
+    let json_msg = match text.parse::<Value>() {
+        Ok(msg) => msg,
+        Err(err) => {
+            eprintln!("Error while parsing message as json: {err}");
+            return None;
+        }
+    };
+    
+    Some(json_msg)
+}
+
+trait JsonValueExt {
+    /// Retrieves a nested value based on the provided path of keys.
+    ///
+    /// # Arguments
+    /// * `path` - An iterable of string keys specifying the nested path.
+    ///
+    /// # Returns
+    /// * `Option<&Value>` - The nested value if found, otherwise `None`.
+    fn get_path<T: IntoIterator<Item = I>, I: Index>(&self, path: T) -> Option<&Value>;
+}
+
+impl JsonValueExt for Value {
+    fn get_path<T: IntoIterator<Item = I>, I: Index>(&self, path: T) -> Option<&Value> {
+        path.into_iter()
+            .fold(Some(self), |acc, key| acc.and_then(|v| v.get(key)))
+    }
 }
