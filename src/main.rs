@@ -2,6 +2,7 @@
 #![allow(unused_labels)]
 
 use anyhow::Context;
+use serde::de::DeserializeOwned;
 use serde_json::value::Index;
 use serde_json::Value;
 use std::net::TcpStream;
@@ -30,40 +31,118 @@ async fn main() -> anyhow::Result<()> {
         .send(Message::Text(r#"sub -e focus_changed"#.into()))
         .context("Failed to subscribe to focus_changed event")?;
 
+    socket
+        .send(Message::Text(r#"sub -e focused_container_moved"#.into()))
+        .context("Failed to subscribe to container moved")?;
+
     loop {
-        let (x, y) = {
-            let json_msg = match read_as_json(&mut socket) {
-                Some(value) => value,
-                None => continue,
-            };
-
-            let x = json_msg
-                .get_path(["data", "focusedContainer", "width"])
-                .and_then(|v| v.as_f64());
-            let y = json_msg
-                .get_path(["data", "focusedContainer", "height"])
-                .and_then(|v| v.as_f64());
-
-            match (x, y) {
-                (Some(x), Some(y)) => (x, y),
-                _ => continue, // skip messages that don't contain the required data
-            }
+        let event = match read_as::<Value>(&mut socket) {
+            Some(value) => value,
+            None => continue,
         };
 
-        if x < y {
-            let _ = socket.send(Message::Text(
-                "command set-tiling-direction vertical".into(),
-            ));
-        }
-        if x > y {
-            let _ = socket.send(Message::Text(
-                "command set-tiling-direction horizontal".into(),
-            ));
+        let event_type = event.get_path(["data", "eventType"]);
+
+        match event_type.and_then(|v| v.as_str()) {
+            Some("focused_container_moved") => {
+                _ = handle_focused_container_moved(event, &mut socket).inspect_err(|e| {
+                    eprintln!("Failed to handle focused container moved event: {e}")
+                });
+            }
+            Some("focus_changed") => {
+                _ = handle_focus_changed(event, &mut socket)
+                    .inspect_err(|e| eprintln!("Failed to handle focus changed event: {e}"))
+            }
+            _ => continue,
         }
     }
 }
 
-fn read_as_json(socket: &mut WebSocket<MaybeTlsStream<TcpStream>>) -> Option<Value> {
+fn handle_focused_container_moved(
+    event: Value,
+    web_socket: &mut WebSocket<MaybeTlsStream<TcpStream>>,
+) -> anyhow::Result<()> {
+    let root_container = event
+        .get_path(["data", "focusedContainer"])
+        .context("Expected focused container event to contain a focused container field")?;
+
+    fn find_focused_window(container: &Value) -> Option<&Value> {
+        let container_type = container.get_path(["type"]).and_then(|v| v.as_str())?;
+        let has_focus = container.get_path(["hasFocus"]).and_then(|v| v.as_bool())?;
+
+        // Termination case: focused window found
+        if container_type == "window" && has_focus {
+            return Some(container);
+        }
+
+        let children = container.get("children").and_then(|v| v.as_array())?;
+
+        // Recursive case: search through children
+        for child in children {
+            if let Some(focused_container) = find_focused_window(child) {
+                return Some(focused_container);
+            }
+        }
+
+        // Termination case: No window with focus
+        None
+    }
+
+    if let Some(focused_window) = find_focused_window(root_container) {
+        let (width, height) = get_container_size(&focused_window)
+            .context("focused container did not have a width or height")?;
+        change_tiling_direction(web_socket, width, height)?;
+    }
+
+    Ok(())
+}
+
+fn handle_focus_changed(
+    event: Value,
+    socket: &mut WebSocket<MaybeTlsStream<TcpStream>>,
+) -> anyhow::Result<()> {
+    let focused_container = event
+        .get_path(["data", "focusedContainer"])
+        .context("Expected focus changed event to contain a focused container field")?;
+    let (width, height) = get_container_size(focused_container)
+        .context("focused container did not have a width or height")?;
+
+    change_tiling_direction(socket, width, height)?;
+
+    Ok(())
+}
+
+fn get_container_size(event: &Value) -> Option<(f64, f64)> {
+    let width = event.get("width").and_then(|v| v.as_f64())?;
+    let height = event.get("height").and_then(|v| v.as_f64())?;
+
+    Some((width, height))
+}
+
+fn change_tiling_direction(
+    socket: &mut WebSocket<MaybeTlsStream<TcpStream>>,
+    window_width: f64,
+    window_height: f64,
+) -> anyhow::Result<()> {
+    if window_width < window_height {
+        socket
+            .send(Message::Text(
+                "command set-tiling-direction vertical".into(),
+            ))
+            .context("Failed to send message to GWM")?;
+    }
+    if window_width > window_height {
+        socket
+            .send(Message::Text(
+                "command set-tiling-direction horizontal".into(),
+            ))
+            .context("Failed to send message to GWM")?;
+    };
+
+    Ok(())
+}
+
+fn read_as<T: DeserializeOwned>(socket: &mut WebSocket<MaybeTlsStream<TcpStream>>) -> Option<T> {
     let msg = match socket.read() {
         Ok(msg) => msg,
         Err(err) => {
@@ -80,7 +159,7 @@ fn read_as_json(socket: &mut WebSocket<MaybeTlsStream<TcpStream>>) -> Option<Val
         }
     };
 
-    let json_msg = match text.parse::<Value>() {
+    let json_msg = match serde_json::from_str(text) {
         Ok(msg) => msg,
         Err(err) => {
             eprintln!("Error while parsing message as json: {err}");
