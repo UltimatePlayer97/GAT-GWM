@@ -2,6 +2,13 @@
 
 This file will contain a list of changes the project has undergone.
 
+## [unreleased]
+
+### ⚙️ Miscellaneous Tasks
+
+- *(release)* Use git-cliff for CHANGELOG.md
+- *(pipelines)* Add pipelines for changelog and rust checks
+
 ## [0.4.0] - 2025-03-19
 
 ### 🚀 Features
