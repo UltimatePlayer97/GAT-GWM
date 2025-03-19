@@ -1,7 +1,7 @@
 #![cfg_attr(feature = "no_console", windows_subsystem = "windows")]
 #![allow(unused_labels)]
 
-use anyhow::Context;
+use anyhow::{Context};
 use serde::de::DeserializeOwned;
 use serde_json::value::Index;
 use serde_json::Value;
@@ -34,15 +34,22 @@ async fn main() -> anyhow::Result<()> {
     socket
         .send(Message::Text(r#"sub -e focused_container_moved"#.into()))
         .context("Failed to subscribe to container moved")?;
-
+    
+    socket
+        .send(Message::Text(r#"sub -e application_exiting"#.into()))
+        .context("Failed to subscribe to container moved")?;
+    
     loop {
         let event = match read_as::<Value>(&mut socket) {
-            Some(value) => value,
-            None => continue,
+            Err(e) => {
+                return Err(e);
+            }
+            Ok(Some(value)) => value,
+            Ok(None) => continue,
         };
 
         let event_type = event.get_path(["data", "eventType"]);
-
+        
         match event_type.and_then(|v| v.as_str()) {
             Some("focused_container_moved") => {
                 _ = handle_focused_container_moved(event, &mut socket).inspect_err(|e| {
@@ -52,6 +59,10 @@ async fn main() -> anyhow::Result<()> {
             Some("focus_changed") => {
                 _ = handle_focus_changed(event, &mut socket)
                     .inspect_err(|e| eprintln!("Failed to handle focus changed event: {e}"))
+            }
+            Some("application_exiting") => {
+                eprintln!("GlazeWM is exiting, exiting too.");
+                std::process::exit(0);
             }
             _ => continue,
         }
@@ -142,12 +153,11 @@ fn change_tiling_direction(
     Ok(())
 }
 
-fn read_as<T: DeserializeOwned>(socket: &mut WebSocket<MaybeTlsStream<TcpStream>>) -> Option<T> {
+fn read_as<T: DeserializeOwned>(socket: &mut WebSocket<MaybeTlsStream<TcpStream>>) -> anyhow::Result<Option<T>> {
     let msg = match socket.read() {
         Ok(msg) => msg,
         Err(err) => {
-            eprintln!("Error while reading message: {err}");
-            return None;
+            return Err(err).context("Failed to read message from GWM socket");
         }
     };
 
@@ -155,7 +165,7 @@ fn read_as<T: DeserializeOwned>(socket: &mut WebSocket<MaybeTlsStream<TcpStream>
         Ok(text) => text,
         Err(err) => {
             eprintln!("Error while converting message to text: {err}");
-            return None;
+            return Ok(None);
         }
     };
 
@@ -163,11 +173,11 @@ fn read_as<T: DeserializeOwned>(socket: &mut WebSocket<MaybeTlsStream<TcpStream>
         Ok(msg) => msg,
         Err(err) => {
             eprintln!("Error while parsing message as json: {err}");
-            return None;
+            return Ok(None);
         }
     };
 
-    Some(json_msg)
+    Ok(Some(json_msg))
 }
 
 trait JsonValueExt {
